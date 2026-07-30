@@ -480,61 +480,57 @@ const CountryMemoryGame = () => {
 
   // Enhanced fetch with more country data
   const fetchCountries = async () => {
-    setLoading(true);
+  setLoading(true);
 
-    try {
-      const response = await fetch(
-        "https://restcountries.com/v3.1/all?fields=name,capital,flag,region,population,flags,area,languages,currencies,timezones"
-      );
+  try {
+    const response = await fetch(
+      "https://trakingsystem.vercel.app/api/v1/country/find_all"
+    );
 
-      if (response.ok) {
-        const data = await response.json();
-        const validCountries = data
-          .filter(
-            (country) =>
-              country.name?.common &&
-              country.capital &&
-              country.capital.length > 0 &&
-              country.region &&
-              country.flags?.png
-          )
-          .map((country) => ({
-            name: country.name.common,
-            capital: Array.isArray(country.capital)
-              ? country.capital[0]
-              : country.capital,
-            flag: country.flag || "🏳️",
-            flagImage: country.flags?.png,
-            region: country.region,
-            population: country.population || 0,
-            area: country.area || 0,
-            languages: country.languages
-              ? Object.values(country.languages).join(", ")
-              : "",
-            currencies: country.currencies
-              ? Object.values(country.currencies)
-                  .map((c) => c.name)
-                  .join(", ")
-              : "",
-            timezone: country.timezones ? country.timezones[0] : "",
-          }));
-
-        if (validCountries.length > 0) {
-          setCountries(validCountries);
-        } else {
-          throw new Error("No valid countries found");
-        }
-      } else {
-        throw new Error("API request failed");
-      }
-    } catch (error) {
-      console.error("Error fetching countries:", error);
-      // Enhanced fallback with more countries
-      const fallbackCountries = [];
-      setCountries(fallbackCountries);
+    if (!response.ok) {
+      throw new Error("API request failed");
     }
+
+    const data = await response.json();
+
+    const countries = data?.data?.countries ?? [];
+
+    const validCountries = countries
+      .filter(
+        (country) =>
+          country.name &&
+          country.capital?.length > 0 &&
+          country.region &&
+          country.flags?.png
+      )
+      .map((country) => ({
+        id: country._id,
+        name: country.name,
+        capital: country.capital[0],
+        region: country.region,
+        subregion: country.subregion,
+        population: country.population || 0,
+        area: country.area || 0,
+        timezone: country.timezones?.[0] || "",
+        flagImage: country.flags.png,
+        flag: country.flag,
+        alpha2Code: country.alpha2Code,
+        alpha3Code: country.alpha3Code,
+        callingCode: country.callingCodes?.[0] || "",
+        nativeName: country.nativeName || "",
+        demonym: country.demonym || "",
+        borders: country.borders || [],
+        independent: country.independent,
+      }));
+
+    setCountries(validCountries);
+  } catch (error) {
+    console.error("Error fetching countries:", error);
+    setCountries([]);
+  } finally {
     setLoading(false);
-  };
+  }
+};
 
   // Enhanced game initialization
   const initializeGame = useCallback(() => {

@@ -1,42 +1,38 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { 
-  Play, 
-  Pause, 
-  Square, 
-  Monitor, 
-  Camera, 
-  Mic, 
-  MicOff, 
-  Download, 
-  Settings,
+import {
+  Play,
+  Pause,
+  Square,
+  Monitor,
+  Camera,
+  Mic,
+  MicOff,
+  Download,
   Clock,
   Video,
   VideoOff,
   Volume2,
-  VolumeX,
   Maximize,
   Minimize,
-  RotateCcw,
-  Share
 } from 'lucide-react';
 
 const VideoRecordingSystem = () => {
   const [isRecording, setIsRecording] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
   const [recordingTime, setRecordingTime] = useState(0);
-  const [recordingMode, setRecordingMode] = useState('screen'); // 'screen', 'camera', 'both'
+  const [recordingMode, setRecordingMode] = useState('screen');
   const [audioEnabled, setAudioEnabled] = useState(true);
   const [videoEnabled, setVideoEnabled] = useState(true);
   const [recordings, setRecordings] = useState([]);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [quality, setQuality] = useState('1080p');
-  const [frameRate, setFrameRate] = useState('30fps');
-  const [pipPosition, setPipPosition] = useState('bottom-right'); // Position for picture-in-picture
-  const [audioSource, setAudioSource] = useState('system'); // 'system', 'microphone', 'both'
+  const [frameRate, setFrameRate] = useState('30');
+  const [pipPosition, setPipPosition] = useState('bottom-right');
+  const [audioSource, setAudioSource] = useState('microphone');
   const [audioLevel, setAudioLevel] = useState(0);
-  
+  const [statusMsg, setStatusMsg] = useState('');
+
   const videoRef = useRef(null);
-  const cameraRef = useRef(null);
   const canvasRef = useRef(null);
   const mediaRecorderRef = useRef(null);
   const screenStreamRef = useRef(null);
@@ -46,430 +42,382 @@ const VideoRecordingSystem = () => {
   const chunksRef = useRef([]);
   const animationRef = useRef(null);
   const audioContextRef = useRef(null);
-  const audioAnalyserRef = useRef(null);
+  const audioLevelIntervalRef = useRef(null);
+  const recordingTimeRef = useRef(0);
 
-  // Timer effect
   useEffect(() => {
     if (isRecording && !isPaused) {
       intervalRef.current = setInterval(() => {
-        setRecordingTime(prev => prev + 1);
+        recordingTimeRef.current += 1;
+        setRecordingTime(recordingTimeRef.current);
       }, 1000);
     } else {
       clearInterval(intervalRef.current);
     }
-    
     return () => clearInterval(intervalRef.current);
   }, [isRecording, isPaused]);
 
-  // Cleanup on unmount
   useEffect(() => {
     return () => {
-      if (animationRef.current) {
-        cancelAnimationFrame(animationRef.current);
-      }
-      if (audioContextRef.current) {
-        audioContextRef.current.close();
-      }
-      clearInterval(intervalRef.current);
+      cleanupAll();
     };
   }, []);
 
-  // Audio level monitoring
+  const cleanupAll = () => {
+    if (animationRef.current) cancelAnimationFrame(animationRef.current);
+    if (audioContextRef.current) {
+      audioContextRef.current.close().catch(() => {});
+      audioContextRef.current = null;
+    }
+    if (audioLevelIntervalRef.current) {
+      clearInterval(audioLevelIntervalRef.current);
+      audioLevelIntervalRef.current = null;
+    }
+    clearInterval(intervalRef.current);
+    stopAllStreams();
+  };
+
+  const stopAllStreams = () => {
+    [screenStreamRef, cameraStreamRef, micStreamRef].forEach(ref => {
+      if (ref.current) {
+        ref.current.getTracks().forEach(t => t.stop());
+        ref.current = null;
+      }
+    });
+  };
+
+  // FIX 2: Audio monitoring using interval instead of stale closure in rAF
   const setupAudioMonitoring = (stream) => {
     try {
+      if (audioContextRef.current) {
+        audioContextRef.current.close().catch(() => {});
+      }
       const audioContext = new (window.AudioContext || window.webkitAudioContext)();
       const analyser = audioContext.createAnalyser();
-      const source = audioContext.createMediaStreamSource(stream);
-      
       analyser.fftSize = 256;
+      const source = audioContext.createMediaStreamSource(stream);
       source.connect(analyser);
-      
       audioContextRef.current = audioContext;
-      audioAnalyserRef.current = analyser;
-      
+
       const dataArray = new Uint8Array(analyser.frequencyBinCount);
-      
-      const updateAudioLevel = () => {
-        if (analyser && isRecording) {
-          analyser.getByteFrequencyData(dataArray);
-          const average = dataArray.reduce((sum, value) => sum + value, 0) / dataArray.length;
-          setAudioLevel(Math.round((average / 255) * 100));
-          requestAnimationFrame(updateAudioLevel);
-        }
-      };
-      
-      updateAudioLevel();
-    } catch (error) {
-      console.error('Error setting up audio monitoring:', error);
+      if (audioLevelIntervalRef.current) clearInterval(audioLevelIntervalRef.current);
+      audioLevelIntervalRef.current = setInterval(() => {
+        analyser.getByteFrequencyData(dataArray);
+        const avg = dataArray.reduce((s, v) => s + v, 0) / dataArray.length;
+        setAudioLevel(Math.round((avg / 255) * 100));
+      }, 100);
+    } catch (err) {
+      console.error('Audio monitoring setup failed:', err);
     }
   };
 
-  // Format time helper
   const formatTime = (seconds) => {
     const hrs = Math.floor(seconds / 3600);
     const mins = Math.floor((seconds % 3600) / 60);
     const secs = seconds % 60;
-    return `${hrs.toString().padStart(2, '0')}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+    return `${String(hrs).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
   };
 
-  // Get video constraints based on quality
   const getVideoConstraints = () => {
-    const constraints = {
-      '720p': { width: 1280, height: 720 },
-      '1080p': { width: 1920, height: 1080 },
-      '4K': { width: 3840, height: 2160 }
-    };
-    return {
-      ...constraints[quality],
-      frameRate: parseInt(frameRate)
-    };
+    const res = { '720p': { width: 1280, height: 720 }, '1080p': { width: 1920, height: 1080 }, '4K': { width: 3840, height: 2160 } };
+    return { ...res[quality], frameRate: parseInt(frameRate) };
   };
 
-  // Mix multiple audio streams
-  const mixAudioStreams = (streams) => {
-    if (streams.length === 0) return null;
-    if (streams.length === 1) return streams[0];
+  // FIX 1 & 4: Proper audio mixing — returns a single MediaStream with mixed audio
+  const buildMixedAudioStream = (audioOnlyStreams) => {
+    const trackedStreams = audioOnlyStreams.filter(s => s && s.getAudioTracks().length > 0);
+    if (trackedStreams.length === 0) return null;
+    if (trackedStreams.length === 1) return trackedStreams[0];
 
     try {
-      const audioContext = new (window.AudioContext || window.webkitAudioContext)();
-      const destination = audioContext.createMediaStreamDestination();
-      const gainNodes = [];
-
-      streams.forEach((stream, index) => {
-        const audioTracks = stream.getAudioTracks();
-        if (audioTracks.length > 0) {
-          const source = audioContext.createMediaStreamSource(stream);
-          const gainNode = audioContext.createGain();
-          
-          // Adjust gain to prevent distortion when mixing
-          gainNode.gain.value = 1.0 / streams.length;
-          
-          source.connect(gainNode);
-          gainNode.connect(destination);
-          gainNodes.push(gainNode);
-        }
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const dest = ctx.createMediaStreamDestination();
+      trackedStreams.forEach(stream => {
+        const src = ctx.createMediaStreamSource(stream);
+        // FIX 4: Use gain of 0.8 per source to avoid clipping, not divided by count
+        const gain = ctx.createGain();
+        gain.gain.value = 0.8;
+        src.connect(gain);
+        gain.connect(dest);
       });
-
-      return destination.stream;
-    } catch (error) {
-      console.error('Error mixing audio streams:', error);
-      // Fallback to first stream with audio
-      return streams.find(stream => stream.getAudioTracks().length > 0) || streams[0];
+      // Store the extra context so it can be closed later
+      audioContextRef.current = ctx;
+      return dest.stream;
+    } catch (err) {
+      console.error('Audio mix error:', err);
+      return trackedStreams[0];
     }
   };
 
-  // Combine screen and camera streams using canvas
-  const combineStreams = (screenStream, cameraStream, canvas) => {
+  // FIX 3: combineStreams now accepts pre-mixed audio stream and adds it to output
+  const combineStreams = (screenStream, cameraStream, canvas, mixedAudioStream) => {
     const ctx = canvas.getContext('2d');
     const screenVideo = document.createElement('video');
     const cameraVideo = document.createElement('video');
-    
     screenVideo.srcObject = screenStream;
     cameraVideo.srcObject = cameraStream;
-    
-    screenVideo.play();
-    cameraVideo.play();
-    
-    const videoConstraints = getVideoConstraints();
-    canvas.width = videoConstraints.width;
-    canvas.height = videoConstraints.height;
-    
+    screenVideo.muted = true;
+    cameraVideo.muted = true;
+    screenVideo.play().catch(() => {});
+    cameraVideo.play().catch(() => {});
+
+    const vc = getVideoConstraints();
+    canvas.width = vc.width;
+    canvas.height = vc.height;
+
     const drawFrame = () => {
-      if (!isRecording) return;
-      
-      // Clear canvas
       ctx.clearRect(0, 0, canvas.width, canvas.height);
-      
-      // Draw screen sharing (main content)
-      if (screenVideo.readyState === 4) {
+      if (screenVideo.readyState >= 2) {
         ctx.drawImage(screenVideo, 0, 0, canvas.width, canvas.height);
       }
-      
-      // Draw camera feed (picture-in-picture)
-      if (cameraVideo.readyState === 4) {
-        const pipSize = Math.min(canvas.width, canvas.height) * 0.25; // 25% of main video
+      if (cameraVideo.readyState >= 2) {
+        const pipSize = Math.min(canvas.width, canvas.height) * 0.25;
         const margin = 20;
-        
-        let pipX, pipY;
-        
+        let px, py;
         switch (pipPosition) {
-          case 'top-left':
-            pipX = margin;
-            pipY = margin;
-            break;
-          case 'top-right':
-            pipX = canvas.width - pipSize - margin;
-            pipY = margin;
-            break;
-          case 'bottom-left':
-            pipX = margin;
-            pipY = canvas.height - pipSize - margin;
-            break;
-          case 'bottom-right':
-          default:
-            pipX = canvas.width - pipSize - margin;
-            pipY = canvas.height - pipSize - margin;
-            break;
+          case 'top-left':    px = margin; py = margin; break;
+          case 'top-right':   px = canvas.width - pipSize - margin; py = margin; break;
+          case 'bottom-left': px = margin; py = canvas.height - pipSize - margin; break;
+          default:            px = canvas.width - pipSize - margin; py = canvas.height - pipSize - margin;
         }
-        
-        // Draw PiP border
         ctx.strokeStyle = '#3B82F6';
         ctx.lineWidth = 3;
-        ctx.strokeRect(pipX - 2, pipY - 2, pipSize + 4, pipSize + 4);
-        
-        // Draw camera video
-        ctx.drawImage(cameraVideo, pipX, pipY, pipSize, pipSize);
+        ctx.strokeRect(px - 2, py - 2, pipSize + 4, pipSize + 4);
+        ctx.drawImage(cameraVideo, px, py, pipSize, pipSize);
       }
-      
       animationRef.current = requestAnimationFrame(drawFrame);
     };
-    
-    // Start drawing when both videos are ready
-    const checkReady = () => {
-      if (screenVideo.readyState === 4 && cameraVideo.readyState === 4) {
+
+    const canvasVideoStream = canvas.captureStream(parseInt(frameRate));
+
+    // FIX 3: Build final stream combining canvas video + mixed audio tracks explicitly
+    const finalStream = new MediaStream();
+    canvasVideoStream.getVideoTracks().forEach(t => finalStream.addTrack(t));
+    if (mixedAudioStream) {
+      mixedAudioStream.getAudioTracks().forEach(t => finalStream.addTrack(t));
+    }
+
+    const waitAndDraw = () => {
+      if (screenVideo.readyState >= 2 && cameraVideo.readyState >= 2) {
         drawFrame();
       } else {
-        setTimeout(checkReady, 100);
+        setTimeout(waitAndDraw, 100);
       }
     };
-    
-    checkReady();
-    
-    // Return canvas stream
-    return canvas.captureStream(parseInt(frameRate));
+    waitAndDraw();
+
+    return finalStream;
   };
 
-  // Start recording
   const startRecording = async () => {
     try {
       chunksRef.current = [];
-      let finalStream;
-      let audioStreams = [];
+      recordingTimeRef.current = 0;
+      setStatusMsg('Starting...');
 
+      let finalStream = null;
+      const audioOnlyStreams = []; // FIX 5: collect audio streams separately, never double-add
+
+      // ── SCREEN MODE ─────────────────────────────────────────────────────────
       if (recordingMode === 'screen') {
-        finalStream = await navigator.mediaDevices.getDisplayMedia({
-          video: getVideoConstraints(),
-          audio: audioEnabled && audioSource !== 'microphone'
-        });
-        screenStreamRef.current = finalStream;
-        
-        if (audioEnabled && finalStream.getAudioTracks().length > 0) {
-          audioStreams.push(finalStream);
-        }
-      } 
-      else if (recordingMode === 'camera') {
-        const constraints = {
-          video: videoEnabled ? getVideoConstraints() : false,
-          audio: false // Handle audio separately
-        };
-        
-        finalStream = await navigator.mediaDevices.getUserMedia(constraints);
-        cameraStreamRef.current = finalStream;
-      } 
-      else if (recordingMode === 'both') {
-        // Get both streams
         const screenStream = await navigator.mediaDevices.getDisplayMedia({
           video: getVideoConstraints(),
-          audio: audioEnabled && (audioSource === 'system' || audioSource === 'both')
+          audio: false, // FIX 5: always capture audio separately for clean mixing
         });
-        
+        screenStreamRef.current = screenStream;
+
+        if (audioEnabled && (audioSource === 'system' || audioSource === 'both')) {
+          // Try to get system audio via display media (supported on some browsers)
+          try {
+            const sysAudio = await navigator.mediaDevices.getDisplayMedia({ video: false, audio: true });
+            audioOnlyStreams.push(sysAudio);
+          } catch {
+            setStatusMsg('System audio unavailable, continuing...');
+          }
+        }
+
+        // Build a clean video-only stream from screen, then add audio below
+        finalStream = new MediaStream(screenStream.getVideoTracks());
+      }
+
+      // ── CAMERA MODE ─────────────────────────────────────────────────────────
+      else if (recordingMode === 'camera') {
+        const camStream = await navigator.mediaDevices.getUserMedia({
+          video: videoEnabled ? getVideoConstraints() : false,
+          audio: false,
+        });
+        cameraStreamRef.current = camStream;
+        finalStream = new MediaStream(camStream.getVideoTracks());
+      }
+
+      // ── BOTH MODE ────────────────────────────────────────────────────────────
+      else if (recordingMode === 'both') {
+        const screenStream = await navigator.mediaDevices.getDisplayMedia({
+          video: getVideoConstraints(),
+          audio: false,
+        });
         const cameraStream = await navigator.mediaDevices.getUserMedia({
           video: videoEnabled ? { width: 640, height: 480 } : false,
-          audio: false // Handle audio separately to avoid conflicts
+          audio: false,
         });
-        
         screenStreamRef.current = screenStream;
         cameraStreamRef.current = cameraStream;
-        
-        // Add screen audio if available
-        if (audioEnabled && screenStream.getAudioTracks().length > 0) {
-          audioStreams.push(screenStream);
+
+        // We resolve audio first so combineStreams can embed it
+        if (audioEnabled && (audioSource === 'microphone' || audioSource === 'both')) {
+          try {
+            const micStream = await navigator.mediaDevices.getUserMedia({
+              audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+              video: false,
+            });
+            micStreamRef.current = micStream;
+            audioOnlyStreams.push(micStream);
+          } catch (e) {
+            console.warn('Mic unavailable:', e);
+          }
         }
-        
-        // Create canvas for combining streams
+
+        const mixedAudio = buildMixedAudioStream(audioOnlyStreams);
         const canvas = canvasRef.current;
-        if (!canvas) {
-          throw new Error('Canvas not available for stream combination');
-        }
-        
-        // Combine video streams
-        const combinedVideoStream = combineStreams(screenStream, cameraStream, canvas);
-        finalStream = combinedVideoStream;
-        
-        // Update preview to show combined stream
-        if (videoRef.current) {
-          videoRef.current.srcObject = finalStream;
-        }
-        
-        // Also show camera preview
-        if (cameraRef.current) {
-          cameraRef.current.srcObject = cameraStream;
-        }
+        finalStream = combineStreams(screenStream, cameraStream, canvas, mixedAudio);
+
+        if (videoRef.current) videoRef.current.srcObject = finalStream;
+
+        // Audio monitoring on mic or first audio stream
+        const monitorStream = micStreamRef.current || (audioOnlyStreams[0] ?? null);
+        if (monitorStream) setupAudioMonitoring(monitorStream);
+
+        setIsRecording(true);
+        setRecordingTime(0);
+        setStatusMsg('');
+        startMediaRecorder(finalStream);
+        return; // Both mode exits here; everything is already wired
       }
 
-      // Handle microphone audio separately
-      if (audioEnabled && (audioSource === 'microphone' || audioSource === 'both')) {
-        try {
-          const micStream = await navigator.mediaDevices.getUserMedia({
-            audio: {
-              echoCancellation: true,
-              noiseSuppression: true,
-              autoGainControl: true
-            },
-            video: false
-          });
-          micStreamRef.current = micStream;
-          audioStreams.push(micStream);
-        } catch (micError) {
-          console.warn('Could not access microphone:', micError);
-          alert('Warning: Could not access microphone. Recording will continue without microphone audio.');
+      // ── AUDIO for SCREEN / CAMERA modes ─────────────────────────────────────
+      if (audioEnabled) {
+        if (audioSource === 'microphone' || audioSource === 'both') {
+          try {
+            const micStream = await navigator.mediaDevices.getUserMedia({
+              audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+              video: false,
+            });
+            micStreamRef.current = micStream;
+            audioOnlyStreams.push(micStream);
+          } catch (e) {
+            console.warn('Mic unavailable:', e);
+            setStatusMsg('Microphone unavailable — recording video only.');
+          }
         }
-      }
 
-      // Mix audio streams if multiple sources
-      if (audioStreams.length > 0) {
-        const mixedAudioStream = mixAudioStreams(audioStreams);
-        if (mixedAudioStream && finalStream) {
-          // Add mixed audio tracks to final stream
-          mixedAudioStream.getAudioTracks().forEach(track => {
-            finalStream.addTrack(track);
-          });
+        // FIX 1: Build mixed audio and add tracks once to finalStream
+        const mixedAudio = buildMixedAudioStream(audioOnlyStreams);
+        if (mixedAudio && finalStream) {
+          mixedAudio.getAudioTracks().forEach(t => finalStream.addTrack(t));
         }
-        
-        // Setup audio monitoring on the first audio stream
-        setupAudioMonitoring(audioStreams[0]);
+
+        const monitorStream = audioOnlyStreams[0] ?? null;
+        if (monitorStream) setupAudioMonitoring(monitorStream);
       }
 
-      if (!finalStream) {
-        throw new Error('Failed to create media stream');
-      }
+      if (!finalStream) throw new Error('Could not create media stream.');
 
-      // For single stream modes, update video preview
-      if (recordingMode !== 'both' && videoRef.current) {
-        videoRef.current.srcObject = finalStream;
-      }
+      if (videoRef.current) videoRef.current.srcObject = finalStream;
 
-      // Set up MediaRecorder with better audio codec support
-      let options = {
-        mimeType: 'video/webm; codecs=vp9,opus',
-        videoBitsPerSecond: quality === '4K' ? 8000000 : quality === '1080p' ? 5000000 : 2500000,
-        audioBitsPerSecond: 128000
-      };
-
-      // Fallback for unsupported codec combinations
-      if (!MediaRecorder.isTypeSupported(options.mimeType)) {
-        options.mimeType = 'video/webm; codecs=vp8,opus';
-        if (!MediaRecorder.isTypeSupported(options.mimeType)) {
-          options.mimeType = 'video/webm';
-        }
-      }
-
-      mediaRecorderRef.current = new MediaRecorder(finalStream, options);
-      
-      mediaRecorderRef.current.ondataavailable = (event) => {
-        if (event.data.size > 0) {
-          chunksRef.current.push(event.data);
-        }
-      };
-
-      mediaRecorderRef.current.onstop = () => {
-        const blob = new Blob(chunksRef.current, { type: 'video/webm' });
-        const url = URL.createObjectURL(blob);
-        const newRecording = {
-          id: Date.now(),
-          url: url,
-          blob: blob,
-          duration: formatTime(recordingTime),
-          timestamp: new Date().toLocaleString(),
-          mode: recordingMode,
-          quality: quality,
-          audioSource: audioSource
-        };
-        setRecordings(prev => [...prev, newRecording]);
-        setAudioLevel(0);
-      };
-
-      mediaRecorderRef.current.start(100);
       setIsRecording(true);
       setRecordingTime(0);
-      
-    } catch (error) {
-      console.error('Error starting recording:', error);
-      alert(`Error starting recording: ${error.message}. Please ensure you have granted necessary permissions.`);
+      setStatusMsg('');
+      startMediaRecorder(finalStream);
+
+    } catch (err) {
+      console.error('startRecording error:', err);
+      setStatusMsg('');
+      alert(`Recording error: ${err.message}`);
     }
   };
 
-  // Stop recording
+  const startMediaRecorder = (stream) => {
+    const mimeTypes = [
+      'video/webm; codecs=vp9,opus',
+      'video/webm; codecs=vp8,opus',
+      'video/webm',
+    ];
+    const mimeType = mimeTypes.find(m => MediaRecorder.isTypeSupported(m)) || '';
+    const bitrate = quality === '4K' ? 8_000_000 : quality === '1080p' ? 5_000_000 : 2_500_000;
+
+    const options = { mimeType, videoBitsPerSecond: bitrate, audioBitsPerSecond: 128_000 };
+    const recorder = new MediaRecorder(stream, options);
+    mediaRecorderRef.current = recorder;
+
+    recorder.ondataavailable = (e) => {
+      if (e.data.size > 0) chunksRef.current.push(e.data);
+    };
+
+    recorder.onstop = () => {
+      const blob = new Blob(chunksRef.current, { type: 'video/webm' });
+      const url = URL.createObjectURL(blob);
+      setRecordings(prev => [...prev, {
+        id: Date.now(),
+        url,
+        blob,
+        duration: formatTime(recordingTimeRef.current),
+        timestamp: new Date().toLocaleString(),
+        mode: recordingMode,
+        quality,
+        audioSource,
+      }]);
+      setAudioLevel(0);
+    };
+
+    recorder.start(100);
+  };
+
   const stopRecording = () => {
-    // Stop animation frame for combined mode
-    if (animationRef.current) {
-      cancelAnimationFrame(animationRef.current);
+    if (animationRef.current) cancelAnimationFrame(animationRef.current);
+    if (audioLevelIntervalRef.current) {
+      clearInterval(audioLevelIntervalRef.current);
+      audioLevelIntervalRef.current = null;
     }
-    
-    // Stop audio context
     if (audioContextRef.current) {
-      audioContextRef.current.close();
+      audioContextRef.current.close().catch(() => {});
       audioContextRef.current = null;
     }
-    
-    if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
       mediaRecorderRef.current.stop();
     }
-    
-    // Stop all streams
-    if (screenStreamRef.current) {
-      screenStreamRef.current.getTracks().forEach(track => track.stop());
-      screenStreamRef.current = null;
-    }
-    
-    if (cameraStreamRef.current) {
-      cameraStreamRef.current.getTracks().forEach(track => track.stop());
-      cameraStreamRef.current = null;
-    }
-    
-    if (micStreamRef.current) {
-      micStreamRef.current.getTracks().forEach(track => track.stop());
-      micStreamRef.current = null;
-    }
-    
+    stopAllStreams();
+
     setIsRecording(false);
     setIsPaused(false);
     setRecordingTime(0);
+    recordingTimeRef.current = 0;
     setAudioLevel(0);
-    
-    // Clear video previews
-    if (videoRef.current) {
-      videoRef.current.srcObject = null;
-    }
-    if (cameraRef.current) {
-      cameraRef.current.srcObject = null;
-    }
+
+    if (videoRef.current) videoRef.current.srcObject = null;
   };
 
-  // Pause/Resume recording
   const togglePause = () => {
-    if (mediaRecorderRef.current) {
-      if (isPaused) {
-        mediaRecorderRef.current.resume();
-        setIsPaused(false);
-      } else {
-        mediaRecorderRef.current.pause();
-        setIsPaused(true);
-      }
+    if (!mediaRecorderRef.current) return;
+    if (isPaused) {
+      mediaRecorderRef.current.resume();
+      setIsPaused(false);
+    } else {
+      mediaRecorderRef.current.pause();
+      setIsPaused(true);
     }
   };
 
-  // Download recording
-  const downloadRecording = (recording) => {
+  const downloadRecording = (rec) => {
     const a = document.createElement('a');
-    a.href = recording.url;
-    a.download = `recording_${recording.timestamp.replace(/[/,:]/g, '-')}.webm`;
+    a.href = rec.url;
+    a.download = `recording_${rec.timestamp.replace(/[/,: ]/g, '-')}.webm`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
   };
 
-  // Toggle fullscreen
+  const deleteRecording = (id) => setRecordings(prev => prev.filter(r => r.id !== id));
+
   const toggleFullscreen = () => {
     if (!document.fullscreenElement) {
       document.documentElement.requestFullscreen();
@@ -480,87 +428,67 @@ const VideoRecordingSystem = () => {
     }
   };
 
-  // Delete recording
-  const deleteRecording = (id) => {
-    setRecordings(prev => prev.filter(rec => rec.id !== id));
-  };
-
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900 text-white p-2">
       <div className="max-w-7xl mx-auto">
-        {/* Hidden canvas for stream combination */}
-        <canvas
-          ref={canvasRef}
-          style={{ display: 'none' }}
-        />
-        
-        {/* Compact Header with All Controls */}
-        <div className="bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900 text-white rounded-lg p-3 mb-3 border border-slate-700">
+        <canvas ref={canvasRef} style={{ display: 'none' }} />
+
+        {/* Header Controls */}
+        <div className="bg-slate-800 border border-slate-700 rounded-lg p-3 mb-3">
           <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
-            {/* Title and Status */}
+
+            {/* Title + Status */}
             <div className="flex items-center gap-3">
               <h1 className="text-lg font-semibold bg-gradient-to-r from-blue-400 to-blue-600 bg-clip-text text-transparent">
                 Video Studio Pro
               </h1>
+              {statusMsg && (
+                <span className="text-xs text-yellow-300 animate-pulse">{statusMsg}</span>
+              )}
               {isRecording && (
                 <div className="flex items-center gap-1 bg-red-600 px-2 py-1 rounded text-xs">
-                  <div className="w-2 h-2 bg-white rounded-full animate-pulse"></div>
+                  <div className="w-2 h-2 bg-white rounded-full animate-pulse" />
                   <span className="font-mono">{formatTime(recordingTime)}</span>
                   {isPaused && <span className="ml-1 text-yellow-300">PAUSED</span>}
                 </div>
               )}
             </div>
 
-            {/* Recording Mode */}
+            {/* Mode */}
             <div className="flex bg-slate-700 rounded p-0.5">
-              <button
-                onClick={() => setRecordingMode('screen')}
-                className={`px-2 py-1 rounded text-xs flex items-center gap-1 transition-colors ${
-                  recordingMode === 'screen' ? 'bg-blue-600 text-white' : 'text-slate-300 hover:text-white'
-                }`}
-                disabled={isRecording}
-              >
-                <Monitor size={12} />
-                Screen
-              </button>
-              <button
-                onClick={() => setRecordingMode('camera')}
-                className={`px-2 py-1 rounded text-xs flex items-center gap-1 transition-colors ${
-                  recordingMode === 'camera' ? 'bg-blue-600 text-white' : 'text-slate-300 hover:text-white'
-                }`}
-                disabled={isRecording}
-              >
-                <Camera size={12} />
-                Camera
-              </button>
-              <button
-                onClick={() => setRecordingMode('both')}
-                className={`px-2 py-1 rounded text-xs flex items-center gap-1 transition-colors ${
-                  recordingMode === 'both' ? 'bg-green-600 text-white' : 'text-slate-300 hover:text-white'
-                }`}
-                disabled={isRecording}
-              >
-                <Video size={12} />
-                Both
-              </button>
+              {[['screen', 'Screen', Monitor], ['camera', 'Camera', Camera], ['both', 'Both', Video]].map(([val, label, Icon]) => (
+                <button
+                  key={val}
+                  onClick={() => setRecordingMode(val)}
+                  disabled={isRecording}
+                  className={`px-2 py-1 rounded text-xs flex items-center gap-1 transition-colors ${
+                    recordingMode === val
+                      ? val === 'both' ? 'bg-green-600 text-white' : 'bg-blue-600 text-white'
+                      : 'text-slate-300 hover:text-white'
+                  }`}
+                >
+                  <Icon size={12} />
+                  {label}
+                </button>
+              ))}
             </div>
 
-            {/* Audio Source Selection */}
+            {/* Audio Source */}
             <div className="flex items-center gap-1">
               <span className="text-xs text-slate-400">Audio:</span>
               <select
                 value={audioSource}
-                onChange={(e) => setAudioSource(e.target.value)}
-                className="bg-slate-700 rounded px-2 py-1 text-xs text-white border border-slate-600"
+                onChange={e => setAudioSource(e.target.value)}
                 disabled={isRecording}
+                className="bg-slate-700 rounded px-2 py-1 text-xs text-white border border-slate-600"
               >
-                <option value="system">System</option>
                 <option value="microphone">Microphone</option>
+                <option value="system">System</option>
                 <option value="both">Both</option>
               </select>
             </div>
 
-            {/* Audio Level Indicator */}
+            {/* Audio Level */}
             {isRecording && audioEnabled && (
               <div className="flex items-center gap-1">
                 <Volume2 size={12} className="text-green-400" />
@@ -576,15 +504,15 @@ const VideoRecordingSystem = () => {
               </div>
             )}
 
-            {/* PiP Position for Both mode */}
+            {/* PiP position */}
             {recordingMode === 'both' && (
               <div className="flex items-center gap-1">
                 <span className="text-xs text-slate-400">PiP:</span>
                 <select
                   value={pipPosition}
-                  onChange={(e) => setPipPosition(e.target.value)}
-                  className="bg-slate-700 rounded px-2 py-1 text-xs text-white border border-slate-600"
+                  onChange={e => setPipPosition(e.target.value)}
                   disabled={isRecording}
+                  className="bg-slate-700 rounded px-2 py-1 text-xs text-white border border-slate-600"
                 >
                   <option value="top-left">Top Left</option>
                   <option value="top-right">Top Right</option>
@@ -594,13 +522,13 @@ const VideoRecordingSystem = () => {
               </div>
             )}
 
-            {/* Quality Controls */}
+            {/* Quality */}
             <div className="flex items-center gap-1">
               <select
                 value={quality}
-                onChange={(e) => setQuality(e.target.value)}
-                className="bg-slate-700 rounded px-2 py-1 text-xs text-white border border-slate-600"
+                onChange={e => setQuality(e.target.value)}
                 disabled={isRecording}
+                className="bg-slate-700 rounded px-2 py-1 text-xs text-white border border-slate-600"
               >
                 <option value="720p">720p</option>
                 <option value="1080p">1080p</option>
@@ -608,47 +536,43 @@ const VideoRecordingSystem = () => {
               </select>
               <select
                 value={frameRate}
-                onChange={(e) => setFrameRate(e.target.value)}
-                className="bg-slate-700 rounded px-2 py-1 text-xs text-white border border-slate-600"
+                onChange={e => setFrameRate(e.target.value)}
                 disabled={isRecording}
+                className="bg-slate-700 rounded px-2 py-1 text-xs text-white border border-slate-600"
               >
                 <option value="30">30fps</option>
                 <option value="60">60fps</option>
-                <option value="120">120fps</option>
               </select>
             </div>
 
-            {/* Audio/Video Toggle */}
+            {/* Audio/Video toggles */}
             <div className="flex gap-1">
               <button
                 onClick={() => setAudioEnabled(!audioEnabled)}
-                className={`p-1.5 rounded transition-colors ${
-                  audioEnabled ? 'bg-blue-600 hover:bg-blue-700' : 'bg-red-600 hover:bg-red-700'
-                }`}
                 disabled={isRecording}
+                className={`p-1.5 rounded transition-colors ${audioEnabled ? 'bg-blue-600 hover:bg-blue-700' : 'bg-red-600 hover:bg-red-700'}`}
+                title={audioEnabled ? 'Mute audio' : 'Enable audio'}
               >
                 {audioEnabled ? <Mic size={12} /> : <MicOff size={12} />}
               </button>
               <button
                 onClick={() => setVideoEnabled(!videoEnabled)}
-                className={`p-1.5 rounded transition-colors ${
-                  videoEnabled ? 'bg-blue-600 hover:bg-blue-700' : 'bg-red-600 hover:bg-red-700'
-                }`}
                 disabled={isRecording}
+                className={`p-1.5 rounded transition-colors ${videoEnabled ? 'bg-blue-600 hover:bg-blue-700' : 'bg-red-600 hover:bg-red-700'}`}
+                title={videoEnabled ? 'Disable video' : 'Enable video'}
               >
                 {videoEnabled ? <Video size={12} /> : <VideoOff size={12} />}
               </button>
             </div>
 
-            {/* Main Recording Controls */}
+            {/* Record Controls */}
             <div className="flex items-center gap-1">
               {!isRecording ? (
                 <button
                   onClick={startRecording}
                   className="bg-red-600 hover:bg-red-700 px-3 py-1.5 rounded flex items-center gap-1 transition-colors text-xs font-medium"
                 >
-                  <Play size={12} />
-                  Record
+                  <Play size={12} /> Record
                 </button>
               ) : (
                 <div className="flex gap-1">
@@ -663,14 +587,14 @@ const VideoRecordingSystem = () => {
                     onClick={stopRecording}
                     className="bg-slate-600 hover:bg-slate-700 px-2 py-1.5 rounded flex items-center gap-1 transition-colors text-xs"
                   >
-                    <Square size={12} />
-                    Stop
+                    <Square size={12} /> Stop
                   </button>
                 </div>
               )}
               <button
                 onClick={toggleFullscreen}
                 className="p-1.5 bg-slate-700 rounded hover:bg-slate-600 transition-colors ml-1"
+                title="Toggle fullscreen"
               >
                 {isFullscreen ? <Minimize size={12} /> : <Maximize size={12} />}
               </button>
@@ -678,74 +602,38 @@ const VideoRecordingSystem = () => {
           </div>
         </div>
 
-        {/* Two Column Layout */}
+        {/* Main Layout */}
         <div className="grid lg:grid-cols-3 gap-3">
-          {/* Video Preview */}
-          <div className="lg:col-span-2 bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900 text-white rounded-lg p-3 border border-slate-700">
+
+          {/* Preview */}
+          <div className="lg:col-span-2 bg-slate-800 border border-slate-700 rounded-lg p-3">
             <div className="flex items-center justify-between mb-2">
               <div className="flex items-center gap-2">
                 <Monitor size={14} />
                 <h2 className="text-sm font-medium">
-                  Live Preview {recordingMode === 'both' ? '(Combined)' : `(${recordingMode})`}
+                  Live Preview {recordingMode === 'both' ? '(Screen + Camera)' : `(${recordingMode})`}
                 </h2>
-                {audioEnabled && (
-                  <div className="flex items-center gap-1 text-xs text-slate-400">
-                    <Volume2 size={10} />
-                    <span>{audioSource}</span>
-                  </div>
-                )}
               </div>
               {recordingMode === 'both' && (
-                <div className="text-xs text-slate-400">
-                  Camera in {pipPosition.replace('-', ' ')}
-                </div>
+                <span className="text-xs text-slate-400">Camera: {pipPosition.replace('-', ' ')}</span>
               )}
             </div>
-            
             <div className="relative bg-black rounded overflow-hidden" style={{ aspectRatio: '16/9' }}>
-              <video
-                ref={videoRef}
-                autoPlay
-                muted
-                className="w-full h-full object-contain"
-              />
+              <video ref={videoRef} autoPlay muted className="w-full h-full object-contain" />
               {!isRecording && (
                 <div className="absolute inset-0 flex items-center justify-center">
                   <div className="text-center">
                     <Camera size={32} className="mx-auto mb-1 text-slate-500" />
                     <p className="text-xs text-slate-400">No active recording</p>
-                    <p className="text-xs text-slate-500 mt-1">
-                      {recordingMode === 'both' ? 'Screen + Camera mode selected' : `${recordingMode.charAt(0).toUpperCase() + recordingMode.slice(1)} mode selected`}
-                    </p>
-                    <p className="text-xs text-slate-500">
-                      Audio: {audioEnabled ? audioSource : 'disabled'}
-                    </p>
+                    <p className="text-xs text-slate-500 mt-1">{recordingMode} mode • Audio: {audioEnabled ? audioSource : 'disabled'}</p>
                   </div>
                 </div>
               )}
             </div>
-
-            {/* Camera preview for "both" mode when not recording */}
-            {recordingMode === 'both' && !isRecording && (
-              <div className="mt-2">
-                <div className="flex items-center gap-2 mb-1">
-                  <Camera size={12} />
-                  <span className="text-xs text-slate-400">Camera Preview</span>
-                </div>
-                <div className="relative bg-black rounded overflow-hidden w-32 h-24">
-                  <video
-                    ref={cameraRef}
-                    autoPlay
-                    muted
-                    className="w-full h-full object-cover"
-                  />
-                </div>
-              </div>
-            )}
           </div>
 
-          {/* Recordings List */}
-          <div className="bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900 text-white rounded-lg p-3 border border-slate-700">
+          {/* Recordings */}
+          <div className="bg-slate-800 border border-slate-700 rounded-lg p-3">
             <div className="flex items-center gap-2 mb-2">
               <Clock size={14} />
               <h2 className="text-sm font-medium">Recordings ({recordings.length})</h2>
@@ -758,39 +646,32 @@ const VideoRecordingSystem = () => {
                 </div>
               ) : (
                 <div className="space-y-2">
-                  {recordings.map((recording) => (
-                    <div key={recording.id} className="bg-slate-700 rounded p-2 border border-slate-600">
-                      <div className="flex items-center justify-between">
+                  {recordings.map(rec => (
+                    <div key={rec.id} className="bg-slate-700 rounded p-2 border border-slate-600">
+                      <div className="flex items-center justify-between gap-2">
                         <div className="flex items-center gap-2 min-w-0 flex-1">
                           <div className={`p-1 rounded flex-shrink-0 ${
-                            recording.mode === 'both' ? 'bg-green-600' : 
-                            recording.mode === 'screen' ? 'bg-blue-600' : 'bg-purple-600'
+                            rec.mode === 'both' ? 'bg-green-600' : rec.mode === 'screen' ? 'bg-blue-600' : 'bg-purple-600'
                           }`}>
                             <Video size={10} />
                           </div>
                           <div className="min-w-0 flex-1">
-                            <h3 className="text-xs font-medium truncate">
-                              Recording {recording.id}
-                              {recording.mode === 'both' && <span className="text-green-400 ml-1">●</span>}
-                            </h3>
+                            <p className="text-xs font-medium truncate">{rec.timestamp}</p>
                             <p className="text-xs text-slate-400 truncate">
-                              {recording.duration} • {recording.mode} • {recording.quality}
-                            </p>
-                            <p className="text-xs text-slate-500 truncate">
-                              {recording.timestamp} • Audio: {recording.audioSource || 'system'}
+                              {rec.duration} · {rec.mode} · {rec.quality} · 🎙 {rec.audioSource}
                             </p>
                           </div>
                         </div>
                         <div className="flex gap-1 flex-shrink-0">
                           <button
-                            onClick={() => downloadRecording(recording)}
+                            onClick={() => downloadRecording(rec)}
                             className="bg-blue-600 hover:bg-blue-700 p-1 rounded transition-colors"
                             title="Download"
                           >
                             <Download size={10} />
                           </button>
                           <button
-                            onClick={() => deleteRecording(recording.id)}
+                            onClick={() => deleteRecording(rec.id)}
                             className="bg-red-600 hover:bg-red-700 p-1 rounded transition-colors"
                             title="Delete"
                           >
